@@ -20,26 +20,36 @@ import (
 	"testing"
 
 	"github.com/DingTalk-Real-AI/dingtalk-workspace-cli/internal/helpers"
+	"github.com/DingTalk-Real-AI/dingtalk-workspace-cli/internal/output"
 	"github.com/DingTalk-Real-AI/dingtalk-workspace-cli/internal/shortcut"
 	"github.com/DingTalk-Real-AI/dingtalk-workspace-cli/pkg/edition"
 	"github.com/spf13/cobra"
 )
 
 type platformCoverageCaller struct {
-	called  bool
-	product string
-	tool    string
-	args    map[string]any
+	called    bool
+	callCount int
+	product   string
+	tool      string
+	args      map[string]any
 }
 
 func (f *platformCoverageCaller) reset() {
-	f.called, f.product, f.tool, f.args = false, "", "", nil
+	f.called, f.callCount, f.product, f.tool, f.args = false, 0, "", "", nil
 }
 
 func (f *platformCoverageCaller) CallTool(_ context.Context, product, tool string, args map[string]any) (*edition.ToolResult, error) {
 	f.called, f.product, f.tool, f.args = true, product, tool, args
+	f.callCount++
+	response := `{"result":[]}`
+	switch tool {
+	case "get_share_form_config":
+		response = `{"success":true,"data":{"baseId":"base-smoke","tableId":"table-smoke","viewId":"view-smoke","enabled":true,"status":1,"shareFormUuid":"share-1","formCover":"https://example.test/cover.png"}}`
+	case "update_share_form":
+		response = `{"success":true,"data":{"baseId":"base-smoke","tableId":"table-smoke","viewId":"view-smoke","enabled":false,"status":2,"shareFormUuid":"share-1","formCover":"https://example.test/cover.png","cpSynced":true}}`
+	}
 	return &edition.ToolResult{
-		Content: []edition.ContentBlock{{Type: "text", Text: `{"result":[]}`}},
+		Content: []edition.ContentBlock{{Type: "text", Text: response}},
 	}, nil
 }
 
@@ -50,6 +60,8 @@ func (f *platformCoverageCaller) JQ() string     { return "" }
 
 func newPlatformCoverageRoot() *cobra.Command {
 	root := &cobra.Command{Use: "dws", SilenceUsage: true, SilenceErrors: true}
+	ctx, _ := output.WithResultStore(context.Background())
+	root.SetContext(ctx)
 	root.SetOut(io.Discard)
 	root.SetErr(io.Discard)
 	root.PersistentFlags().Bool("yes", false, "")
@@ -135,6 +147,9 @@ func TestCrossPlatformCoverageShareFormShortcutMatchesPublishedSchema(t *testing
 	}
 	if !fake.called || fake.product != "aitable-helper" || fake.tool != "update_share_form" {
 		t.Fatalf("tool call = called:%v %s/%s, want legacy-compatible aitable-helper/update_share_form", fake.called, fake.product, fake.tool)
+	}
+	if fake.callCount != 1 {
+		t.Fatalf("update_share_form call count = %d, want exactly one", fake.callCount)
 	}
 	expected := map[string]any{
 		"enabled": false, "authTypeCode": 2, "authData": "u1,u2",
