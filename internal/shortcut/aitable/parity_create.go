@@ -138,6 +138,11 @@ func executeParityFieldCreate(rt *shortcut.RuntimeContext) error {
 		if writeErr == nil {
 			writeErr = receiptErr
 		}
+		if receiptErr == nil && fieldReadbackPendingReceipt(receipt) {
+			// MCP kept the IDs of acknowledged writes whose visibility budget expired.
+			// Continue exact-ID reads; never replay create_fields.
+			writeErr = nil
+		}
 		if writeErr != nil {
 			return compositeError(result, writeErr, false)
 		}
@@ -221,7 +226,7 @@ func parityCreatedFieldIDs(raw map[string]any, expected []any) ([]string, error)
 			continue
 		}
 		delete(names, name)
-		if m["success"] != true {
+		if m["success"] != true && stringValue(m, "errorCode") != "CREATE_FIELD_READBACK_PENDING" {
 			failure = fmt.Errorf("create_fields rejected field %q: %s", name, stringValue(m, "errorMessage", "reason", "errorCode"))
 			continue
 		}
@@ -237,6 +242,29 @@ func parityCreatedFieldIDs(raw map[string]any, expected []any) ([]string, error)
 		failure = fmt.Errorf("create_fields omitted one or more field results")
 	}
 	return ids, failure
+}
+
+// Only this explicit post-write marker permits ignoring a failed receipt while
+// verifying its known IDs. Other failures retain their existing stop boundary.
+func fieldReadbackPendingReceipt(raw map[string]any) bool {
+	rows, ok := parityResponseObject(raw)["results"].([]any)
+	if !ok {
+		return false
+	}
+	pending := false
+	for _, raw := range rows {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			return false
+		}
+		if item["success"] != true {
+			if item["errorCode"] != "CREATE_FIELD_READBACK_PENDING" {
+				return false
+			}
+			pending = true
+		}
+	}
+	return pending
 }
 func readParityCreatedFields(rt *shortcut.RuntimeContext, base, table string, ids []string) ([]map[string]any, error) {
 	all := []map[string]any{}
