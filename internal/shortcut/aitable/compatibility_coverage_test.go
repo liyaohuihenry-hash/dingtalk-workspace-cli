@@ -15,6 +15,7 @@ package aitable
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -32,21 +33,30 @@ type platformCoverageCaller struct {
 	product   string
 	tool      string
 	args      map[string]any
+	response  string
+	err       error
 }
 
 func (f *platformCoverageCaller) reset() {
 	f.called, f.callCount, f.product, f.tool, f.args = false, 0, "", "", nil
+	f.response, f.err = "", nil
 }
 
 func (f *platformCoverageCaller) CallTool(_ context.Context, product, tool string, args map[string]any) (*edition.ToolResult, error) {
 	f.called, f.product, f.tool, f.args = true, product, tool, args
 	f.callCount++
-	response := `{"result":[]}`
-	switch tool {
-	case "get_share_form_config":
-		response = `{"success":true,"data":{"baseId":"base-smoke","tableId":"table-smoke","viewId":"view-smoke","enabled":true,"status":1,"shareFormUuid":"share-1","formCover":"https://example.test/cover.png"}}`
-	case "update_share_form":
-		response = `{"success":true,"data":{"baseId":"base-smoke","tableId":"table-smoke","viewId":"view-smoke","enabled":false,"status":2,"shareFormUuid":"share-1","formCover":"https://example.test/cover.png","cpSynced":true}}`
+	if f.err != nil {
+		return nil, f.err
+	}
+	response := f.response
+	if response == "" {
+		response = `{"result":[]}`
+		switch tool {
+		case "get_share_form_config":
+			response = `{"success":true,"data":{"baseId":"base-smoke","tableId":"table-smoke","viewId":"view-smoke","enabled":true,"status":1,"shareFormUuid":"share-1","formCover":"https://example.test/cover.png"}}`
+		case "update_share_form":
+			response = `{"success":true,"data":{"baseId":"base-smoke","tableId":"table-smoke","viewId":"view-smoke","enabled":false,"status":2,"shareFormUuid":"share-1","formCover":"https://example.test/cover.png","cpSynced":true}}`
+		}
 	}
 	return &edition.ToolResult{
 		Content: []edition.ContentBlock{{Type: "text", Text: response}},
@@ -173,6 +183,69 @@ func TestCrossPlatformCoverageShareFormShortcutMatchesPublishedSchema(t *testing
 	if err := root.Execute(); err == nil || fake.called {
 		t.Fatalf("missing partial update must fail before MCP call: err=%v called=%v", err, fake.called)
 	}
+}
+
+func TestCrossPlatformCoverageShareFormShortcutResultBranches(t *testing.T) {
+	fake := &platformCoverageCaller{}
+	helpers.InitDepsForTest(t, fake)
+
+	t.Run("read success", func(t *testing.T) {
+		fake.reset()
+		root := newPlatformCoverageRoot()
+		root.SetArgs([]string{
+			"aitable", "+form-share-get",
+			"--base-id=base-smoke", "--table-id=table-smoke", "--view-id=view-smoke",
+		})
+		if err := root.Execute(); err != nil {
+			t.Fatal(err)
+		}
+		if fake.callCount != 1 || fake.product != "aitable-helper" || fake.tool != "get_share_form_config" {
+			t.Fatalf("get call = count:%d %s/%s", fake.callCount, fake.product, fake.tool)
+		}
+	})
+
+	t.Run("dry run", func(t *testing.T) {
+		fake.reset()
+		root := newPlatformCoverageRoot()
+		root.SetArgs([]string{
+			"aitable", "+form-share-update",
+			"--base-id=base-smoke", "--table-id=table-smoke", "--view-id=view-smoke",
+			"--enabled=true", "--dry-run", "--yes",
+		})
+		if err := root.Execute(); err != nil {
+			t.Fatal(err)
+		}
+		if fake.called {
+			t.Fatalf("dry run called %s/%s", fake.product, fake.tool)
+		}
+	})
+
+	t.Run("transport failure", func(t *testing.T) {
+		fake.reset()
+		transportFailure := errors.New("share read transport failed")
+		fake.err = transportFailure
+		root := newPlatformCoverageRoot()
+		root.SetArgs([]string{
+			"aitable", "+form-share-get",
+			"--base-id=base-smoke", "--table-id=table-smoke", "--view-id=view-smoke",
+		})
+		if err := root.Execute(); !errors.Is(err, transportFailure) {
+			t.Fatalf("transport error = %v, want %v", err, transportFailure)
+		}
+	})
+
+	t.Run("missing data", func(t *testing.T) {
+		fake.reset()
+		fake.response = `{"success":true,"data":null}`
+		root := newPlatformCoverageRoot()
+		root.SetArgs([]string{
+			"aitable", "+form-share-get",
+			"--base-id=base-smoke", "--table-id=table-smoke", "--view-id=view-smoke",
+		})
+		if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "缺少 JSON 对象 data") {
+			t.Fatalf("missing data error = %v", err)
+		}
+	})
 }
 
 func TestCrossPlatformCoverageShareFormShortcutExplicitEmptyUpdate(t *testing.T) {
